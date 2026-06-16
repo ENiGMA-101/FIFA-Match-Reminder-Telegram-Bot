@@ -109,6 +109,28 @@ async def send(msg):
 
 async def monitor():
     print("✅ FIFA World Cup 2026 Bot started! Monitoring matches...")
+
+    # ── On startup: silently mark all already-finished matches as done ──────
+    # This prevents old results from being re-sent every time the bot restarts.
+    try:
+        boot_matches = get_matches()
+        boot_now = datetime.now(BD_TZ)
+        skipped = 0
+        for m in boot_matches:
+            mid = str(m["id"])
+            kickoff = datetime.fromisoformat(
+                m["utcDate"].replace("Z", "+00:00")
+            ).astimezone(BD_TZ)
+            # If the match kicked off before today (BDT date), mark everything sent
+            if kickoff.date() < boot_now.date():
+                sent[mid] = {"rem": True, "ht": True, "ft": True}
+                skipped += 1
+            else:
+                sent[mid] = {"rem": False, "ht": False, "ft": False}
+        print(f"   Skipped {skipped} past match(es). Watching from today onwards.")
+    except Exception as e:
+        print(f"[BOOT WARNING] Could not pre-load matches: {e}")
+
     while True:
         try:
             matches = get_matches()
@@ -116,6 +138,7 @@ async def monitor():
 
             for m in matches:
                 match_id = str(m["id"])
+                # Use existing sent state; don't reset it
                 sent.setdefault(match_id, {"rem": False, "ht": False, "ft": False})
 
                 home = m["homeTeam"]["name"]
