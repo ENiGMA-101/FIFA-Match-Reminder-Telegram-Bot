@@ -1,3 +1,8 @@
-BOT_TOKEN="8810416346:AAGesP6xv7FQ2ncwdcCm7nbv4trCSY--AJk"
-CHAT_ID="1522091023"
-API_KEY="17148893d37d4defabba62e19628373f"
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+API_KEY = os.getenv("API_KEY")
