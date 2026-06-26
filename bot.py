@@ -1,4 +1,6 @@
 import asyncio
+import signal
+import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import requests
@@ -11,6 +13,16 @@ API_URL = "https://api.football-data.org/v4/competitions/WC/matches"
 
 # Track what notifications have been sent per match
 sent = {}
+
+# ── Graceful shutdown on SIGTERM (sent by `timeout`) ─────────────────────────
+_shutdown = False
+
+def _handle_signal(sig, frame):
+    global _shutdown
+    _shutdown = True
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
 
 
 def get_matches():
@@ -29,10 +41,6 @@ def get_match_detail(match_id):
 
 
 def format_scorers(goals, home_team, away_team):
-    """
-    Build a scorer board string from the goals list.
-    goals = [{"minute": 45, "scorer": {"name": "Mbappe"}, "team": {"name": "France"}, "type": "NORMAL"}, ...]
-    """
     if not goals:
         return ""
 
@@ -46,12 +54,10 @@ def format_scorers(goals, home_team, away_team):
         added = g.get("injuryTime")
         goal_type = g.get("type", "NORMAL")
 
-        # Build minute string
         min_str = f"{minute}'"
         if added:
             min_str = f"{minute}+{added}'"
 
-        # Add penalty/OG marker
         suffix = ""
         if goal_type == "PENALTY":
             suffix = " (P)"
@@ -79,7 +85,6 @@ def format_scorers(goals, home_team, away_team):
 
 
 def next_match_info(matches, current_match_id, now):
-    """Find the next upcoming match after the current one."""
     upcoming = []
     for m in matches:
         if str(m["id"]) == current_match_id:
@@ -108,10 +113,10 @@ async def send(msg):
 
 
 async def monitor():
+    global _shutdown
     print("✅ FIFA World Cup 2026 Bot started! Monitoring matches...")
 
-    # ── On startup: silently mark all already-finished matches as done ──────
-    # This prevents old results from being re-sent every time the bot restarts.
+    # ── On startup: silently mark all already-finished matches as done ────────
     try:
         boot_matches = get_matches()
         boot_now = datetime.now(BD_TZ)
@@ -121,7 +126,6 @@ async def monitor():
             kickoff = datetime.fromisoformat(
                 m["utcDate"].replace("Z", "+00:00")
             ).astimezone(BD_TZ)
-            # If the match kicked off before today (BDT date), mark everything sent
             if kickoff.date() < boot_now.date():
                 sent[mid] = {"rem": True, "ht": True, "ft": True}
                 skipped += 1
@@ -131,14 +135,13 @@ async def monitor():
     except Exception as e:
         print(f"[BOOT WARNING] Could not pre-load matches: {e}")
 
-    while True:
+    while not _shutdown:
         try:
             matches = get_matches()
             now = datetime.now(BD_TZ)
 
             for m in matches:
                 match_id = str(m["id"])
-                # Use existing sent state; don't reset it
                 sent.setdefault(match_id, {"rem": False, "ht": False, "ft": False})
 
                 home = m["homeTeam"]["name"]
@@ -151,7 +154,7 @@ async def monitor():
 
                 mins_until = (kickoff - now).total_seconds() / 60
 
-                # ── 30-Minute Reminder ──────────────────────────────────────
+                # ── 30-Minute Reminder ────────────────────────────────────────
                 if 0 <= mins_until <= 30 and not sent[match_id]["rem"]:
                     await send(
                         f"🔔 Match Reminder\n\n"
@@ -162,25 +165,20 @@ async def monitor():
                     sent[match_id]["rem"] = True
                     print(f"[{now:%H:%M}] Reminder sent: {home} vs {away}")
 
-                # ── Half-Time Result ────────────────────────────────────────
+                # ── Half-Time Result ──────────────────────────────────────────
                 if status == "PAUSED" and not sent[match_id]["ht"]:
                     ht_score = m.get("score", {}).get("halfTime", {})
                     hs = ht_score.get("home", "?")
                     as_ = ht_score.get("away", "?")
 
-                    # Try to get goal scorers from match detail
                     detail = get_match_detail(match_id)
                     scorer_block = ""
                     if detail:
                         goals = detail.get("goals", [])
-                        # Only goals up to HT (minute <= 45+injury)
                         ht_goals = [g for g in goals if (g.get("minute") or 99) <= 45]
                         scorer_block = format_scorers(ht_goals, home, away)
 
-                    msg = (
-                        f"⏸ HALF TIME\n\n"
-                        f"{home} {hs} — {as_} {away}\n"
-                    )
+                    msg = f"⏸ HALF TIME\n\n{home} {hs} — {as_} {away}\n"
                     if scorer_block:
                         msg += f"\n📋 Scorers (1st Half):\n{scorer_block}\n"
 
@@ -188,26 +186,21 @@ async def monitor():
                     sent[match_id]["ht"] = True
                     print(f"[{now:%H:%M}] HT sent: {home} {hs}-{as_} {away}")
 
-                # ── Full-Time Result ────────────────────────────────────────
+                # ── Full-Time Result ──────────────────────────────────────────
                 if status == "FINISHED" and not sent[match_id]["ft"]:
                     ft_score = m.get("score", {}).get("fullTime", {})
                     hs = ft_score.get("home", "?")
                     as_ = ft_score.get("away", "?")
 
-                    # Try to get all goal scorers
                     detail = get_match_detail(match_id)
                     scorer_block = ""
                     if detail:
                         goals = detail.get("goals", [])
                         scorer_block = format_scorers(goals, home, away)
 
-                    # Get next match info
                     next_info = next_match_info(matches, match_id, now)
 
-                    msg = (
-                        f"🏁 FULL TIME\n\n"
-                        f"{home} {hs} — {as_} {away}\n"
-                    )
+                    msg = f"🏁 FULL TIME\n\n{home} {hs} — {as_} {away}\n"
                     if scorer_block:
                         msg += f"\n📋 Scorers:\n{scorer_block}\n"
                     if next_info:
@@ -217,11 +210,16 @@ async def monitor():
                     sent[match_id]["ft"] = True
                     print(f"[{now:%H:%M}] FT sent: {home} {hs}-{as_} {away}")
 
-            await asyncio.sleep(60)
-
         except Exception as e:
             print(f"[ERROR] {e}")
-            await asyncio.sleep(60)
+
+        # Sleep in small chunks so SIGTERM is caught quickly
+        for _ in range(60):
+            if _shutdown:
+                break
+            await asyncio.sleep(1)
+
+    print("🛑 Bot shutting down cleanly.")
 
 
 asyncio.run(monitor())
